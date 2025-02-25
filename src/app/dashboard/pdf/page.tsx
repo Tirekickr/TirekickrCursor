@@ -1,3 +1,5 @@
+'use client';
+
 import PDFUploader from '@/components/pdf/PDFUploader';
 
 export default function PDFPage() {

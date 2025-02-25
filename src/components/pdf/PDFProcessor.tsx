@@ -14,17 +14,20 @@ interface TextBlock {
   y: number;
   width: number;
   height: number;
-  isTable: boolean;
+}
+
+interface TableData {
+  headers: string[];
+  rows: string[][];
 }
 
 interface ExtractedData {
-  text: string;
-  structuredData: {
-    tables: string[][];
-    keyValuePairs: { [key: string]: string };
-    amounts: string[];
-    dates: string[];
+  metadata: {
+    companyName: string;
+    documentType: string;
+    period: string;
   };
+  tables: TableData[];
   blocks: TextBlock[];
 }
 
@@ -33,37 +36,86 @@ export function PDFProcessor({ file }: { file: File }) {
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const findDates = (text: string): string[] => {
-    const dateRegex = /\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b/gi;
-    return text.match(dateRegex) || [];
-  };
+  const extractMetadata = (blocks: TextBlock[]): ExtractedData['metadata'] => {
+    let companyName = 'Unknown Company';
+    let documentType = 'Unknown Document Type';
+    let period = 'Unknown Period';
 
-  const findAmounts = (text: string): string[] => {
-    const amountRegex = /\$\s*\d+(?:,\d{3})*(?:\.\d{2})?|\b\d+(?:,\d{3})*(?:\.\d{2})?\s*(?:USD|dollars)\b/gi;
-    return text.match(amountRegex) || [];
-  };
-
-  const detectTables = (blocks: TextBlock[]): string[][] => {
-    // Group blocks by Y position (same line)
-    const lines = new Map<number, TextBlock[]>();
-    
-    blocks.forEach(block => {
-      const roundedY = Math.round(block.y / 10) * 10; // Round to nearest 10 to group nearby Y positions
-      if (!lines.has(roundedY)) {
-        lines.set(roundedY, []);
+    blocks.slice(0, 5).forEach(block => {
+      const text = block.text.trim();
+      if (text.includes('Profit and Loss')) {
+        documentType = 'Profit and Loss';
+      } else if (text.match(/January|February|March|April|May|June|July|August|September|October|November|December/)) {
+        period = text;
+      } else if (!companyName || companyName === 'Unknown Company') {
+        companyName = text;
       }
-      lines.get(roundedY)!.push(block);
     });
 
-    // Sort blocks in each line by X position
-    lines.forEach(lineBlocks => {
-      lineBlocks.sort((a, b) => a.x - b.x);
+    return {
+      companyName,
+      documentType,
+      period,
+    };
+  };
+
+  const detectTables = (blocks: TextBlock[]): TableData[] => {
+    // Sort blocks by Y position
+    const sortedBlocks = [...blocks].sort((a, b) => a.y - b.y);
+    
+    // Group blocks into rows based on Y position
+    const rows: TextBlock[][] = [];
+    let currentRow: TextBlock[] = [];
+    let currentY = sortedBlocks[0]?.y;
+
+    sortedBlocks.forEach(block => {
+      if (Math.abs(block.y - currentY) < 5) {
+        currentRow.push(block);
+      } else {
+        if (currentRow.length > 0) {
+          rows.push([...currentRow].sort((a, b) => a.x - b.x));
+        }
+        currentRow = [block];
+        currentY = block.y;
+      }
+    });
+    
+    if (currentRow.length > 0) {
+      rows.push([...currentRow].sort((a, b) => a.x - b.x));
+    }
+
+    // Determine column boundaries based on X positions
+    const columnBoundaries = [100, 300, 500]; // Example boundaries, adjust as needed
+
+    // Identify potential tables
+    const tables: TableData[] = [];
+    let currentTable: string[][] = [];
+    let headers: string[] = ['Line Item', 'Period 1', 'Period 2'];
+
+    rows.forEach((row, index) => {
+      const rowTexts = ['', '', '']; // Initialize with empty strings for each column
+
+      row.forEach(block => {
+        if (block.x < columnBoundaries[1]) {
+          rowTexts[0] += block.text + ' '; // First column
+        } else if (block.x < columnBoundaries[2]) {
+          rowTexts[1] += block.text + ' '; // Second column
+        } else {
+          rowTexts[2] += block.text + ' '; // Third column
+        }
+      });
+
+      currentTable.push(rowTexts.map(text => text.trim()));
     });
 
-    // Convert to array of text arrays
-    return Array.from(lines.values())
-      .sort((a, b) => a[0].y - b[0].y) // Sort lines by Y position
-      .map(lineBlocks => lineBlocks.map(block => block.text));
+    if (currentTable.length > 0) {
+      tables.push({
+        headers: headers,
+        rows: currentTable
+      });
+    }
+
+    return tables;
   };
 
   const extractText = async () => {
@@ -89,24 +141,19 @@ export function PDFProcessor({ file }: { file: File }) {
               x: item.transform[4],
               y: item.transform[5],
               width: item.width || 0,
-              height: item.height || 0,
-              isTable: false
+              height: item.height || 0
             });
           }
         });
       }
 
+      const metadata = extractMetadata(blocks);
       const tables = detectTables(blocks);
 
       setExtractedData({
-        text: fullText,
-        structuredData: {
-          tables: tables,
-          keyValuePairs: {},
-          amounts: findAmounts(fullText),
-          dates: findDates(fullText)
-        },
-        blocks: blocks
+        metadata,
+        tables,
+        blocks
       });
 
     } catch (err) {
@@ -138,38 +185,46 @@ export function PDFProcessor({ file }: { file: File }) {
 
       {extractedData && (
         <div className="mt-4 space-y-4">
+          {/* Metadata */}
+          <div className="p-4 bg-white rounded-lg border">
+            <h4 className="font-semibold mb-2">Document Metadata</h4>
+            <p><strong>Company Name:</strong> {extractedData.metadata.companyName}</p>
+            <p><strong>Document Type:</strong> {extractedData.metadata.documentType}</p>
+            <p><strong>Period:</strong> {extractedData.metadata.period}</p>
+          </div>
+
           {/* Tables */}
           <div className="p-4 bg-white rounded-lg border">
             <h4 className="font-semibold mb-2">Detected Tables</h4>
-            {extractedData.structuredData.tables.map((row, i) => (
-              <div key={i} className="grid grid-cols-4 gap-2 mb-1">
-                {row.map((cell, j) => (
-                  <div key={j} className="p-1 border text-sm">
-                    {cell}
-                  </div>
-                ))}
+            {extractedData.tables.map((table, tableIndex) => (
+              <div key={tableIndex} className="mb-6">
+                <h5 className="font-medium mb-2">Table {tableIndex + 1}</h5>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        {table.headers.map((header, i) => (
+                          <th key={i} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            {header}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {table.rows.map((row, rowIndex) => (
+                        <tr key={rowIndex}>
+                          {row.map((cell, cellIndex) => (
+                            <td key={cellIndex} className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {cell}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             ))}
-          </div>
-
-          {/* Amounts and Dates */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="p-4 bg-white rounded-lg border">
-              <h4 className="font-semibold mb-2">Amounts Found</h4>
-              <ul className="list-disc pl-4">
-                {extractedData.structuredData.amounts.map((amount, i) => (
-                  <li key={i}>{amount}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="p-4 bg-white rounded-lg border">
-              <h4 className="font-semibold mb-2">Dates Found</h4>
-              <ul className="list-disc pl-4">
-                {extractedData.structuredData.dates.map((date, i) => (
-                  <li key={i}>{date}</li>
-                ))}
-              </ul>
-            </div>
           </div>
 
           {/* Raw Text */}
