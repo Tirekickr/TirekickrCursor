@@ -4,6 +4,7 @@ import { useState } from 'react';
 import * as pdfjs from 'pdfjs-dist';
 import worker from 'pdfjs-dist/build/pdf.worker.entry';
 import { TextItem } from 'pdfjs-dist/types/src/display/api';
+import { writeDataToSheet } from '../../lib/googleSheets'; // Adjust the import path as needed
 
 // Set worker
 pdfjs.GlobalWorkerOptions.workerSrc = worker;
@@ -133,7 +134,7 @@ export function PDFProcessor({ file }: { file: File }) {
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
         
-        textContent.items.forEach((item: TextItem) => {
+        textContent.items.forEach((item: TextItem | TextMarkedContent) => {
           if ('str' in item && 'transform' in item) {
             fullText += item.str + '\n';
             blocks.push({
@@ -150,11 +151,16 @@ export function PDFProcessor({ file }: { file: File }) {
       const metadata = extractMetadata(blocks);
       const tables = detectTables(blocks);
 
-      setExtractedData({
+      const extractedData = {
         metadata,
         tables,
         blocks
-      });
+      };
+
+      setExtractedData(extractedData);
+
+      // Write data to Google Sheet
+      await writeDataToSheet(extractedData);
 
     } catch (err) {
       console.error('PDF processing error:', err);
